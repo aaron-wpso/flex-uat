@@ -15,43 +15,90 @@ const db = new DatabaseSync(DB_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS results (
-    module TEXT NOT NULL, case_id TEXT NOT NULL, value TEXT NOT NULL,
+    round TEXT NOT NULL, module TEXT NOT NULL, case_id TEXT NOT NULL, value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (module, case_id));
+    PRIMARY KEY (round, module, case_id));
   CREATE TABLE IF NOT EXISTS remarks (
-    module TEXT NOT NULL, section TEXT NOT NULL, text TEXT NOT NULL,
+    round TEXT NOT NULL, module TEXT NOT NULL, case_id TEXT NOT NULL, text TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (module, section));
+    PRIMARY KEY (round, module, case_id));
   CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY, value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')));
 `);
 
+/* A database written before rounds existed has no `round` column, and SQLite
+   cannot add one to a primary key - the table has to be rebuilt. Everything
+   already recorded belongs to the first round. Remarks also carried a `section`
+   column back when a remark belonged to a section rather than a case. */
+const lacksRound = t => !db.prepare(`PRAGMA table_info(${t})`).all().some(c => c.name === 'round');
+function migrate() {
+  const old = ['results', 'remarks'].filter(lacksRound);
+  if (!old.length) return;
+  db.exec('BEGIN');
+  try {
+    if (old.includes('results')) db.exec(`
+      CREATE TABLE results_new (
+        round TEXT NOT NULL, module TEXT NOT NULL, case_id TEXT NOT NULL, value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (round, module, case_id));
+      INSERT INTO results_new (round, module, case_id, value, updated_at)
+        SELECT 'R1', module, case_id, value, updated_at FROM results;
+      DROP TABLE results;
+      ALTER TABLE results_new RENAME TO results;`);
+    if (old.includes('remarks')) {
+      const col = db.prepare('PRAGMA table_info(remarks)').all().some(c => c.name === 'case_id')
+        ? 'case_id' : 'section';
+      db.exec(`
+        CREATE TABLE remarks_new (
+          round TEXT NOT NULL, module TEXT NOT NULL, case_id TEXT NOT NULL, text TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (round, module, case_id));
+        INSERT INTO remarks_new (round, module, case_id, text, updated_at)
+          SELECT 'R1', module, ${col}, text, updated_at FROM remarks;
+        DROP TABLE remarks;
+        ALTER TABLE remarks_new RENAME TO remarks;`);
+    }
+    // Session details were global before rounds; they described that one session,
+    // which is now round 1. Leave already-scoped and internal keys alone.
+    for (const { key } of db.prepare('SELECT key FROM meta').all()) {
+      if (key.startsWith('__') || /^R\d+\./.test(key)) continue;
+      db.prepare('UPDATE meta SET key = ? WHERE key = ?').run('R1.' + key, key);
+    }
+    db.exec('COMMIT');
+    console.log(`  Migrated ${old.join(' and ')} into round R1.`);
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+migrate();
+
 const q = {
-  allResults: db.prepare('SELECT module, case_id, value FROM results'),
-  allRemarks: db.prepare('SELECT module, section, text FROM remarks'),
+  allResults: db.prepare('SELECT round, module, case_id, value FROM results'),
+  allRemarks: db.prepare('SELECT round, module, case_id, text FROM remarks'),
   allMeta:    db.prepare('SELECT key, value FROM meta'),
-  setResult:  db.prepare(`INSERT INTO results (module, case_id, value) VALUES (?, ?, ?)
-                          ON CONFLICT(module, case_id) DO UPDATE SET value = excluded.value,
+  setResult:  db.prepare(`INSERT INTO results (round, module, case_id, value) VALUES (?, ?, ?, ?)
+                          ON CONFLICT(round, module, case_id) DO UPDATE SET value = excluded.value,
                           updated_at = datetime('now')`),
-  delResult:  db.prepare('DELETE FROM results WHERE module = ? AND case_id = ?'),
-  clrModule:  db.prepare('DELETE FROM results WHERE module = ?'),
-  clrRemarks: db.prepare('DELETE FROM remarks WHERE module = ?'),
-  setRemark:  db.prepare(`INSERT INTO remarks (module, section, text) VALUES (?, ?, ?)
-                          ON CONFLICT(module, section) DO UPDATE SET text = excluded.text,
+  clrModule:  db.prepare('DELETE FROM results WHERE round = ? AND module = ?'),
+  clrRemarks: db.prepare('DELETE FROM remarks WHERE round = ? AND module = ?'),
+  setRemark:  db.prepare(`INSERT INTO remarks (round, module, case_id, text) VALUES (?, ?, ?, ?)
+                          ON CONFLICT(round, module, case_id) DO UPDATE SET text = excluded.text,
                           updated_at = datetime('now')`),
   setMeta:    db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?)
                           ON CONFLICT(key) DO UPDATE SET value = excluded.value,
                           updated_at = datetime('now')`),
+  dropRound:  db.prepare('DELETE FROM results WHERE round = ?'),
+  dropRoundR: db.prepare('DELETE FROM remarks WHERE round = ?'),
+  dropRoundM: db.prepare("DELETE FROM meta WHERE key LIKE ? || '.%'"),
 };
 
 // Bumped on every write; clients poll it and only refetch when it moves.
 let revision = 1;
 
+// res and rem are keyed round -> module -> case id.
 function readState() {
   const res = {}, rem = {}, meta = {};
-  for (const r of q.allResults.all()) (res[r.module] ??= {})[r.case_id] = r.value;
-  for (const r of q.allRemarks.all()) (rem[r.module] ??= {})[r.section] = r.text;
+  for (const r of q.allResults.all()) ((res[r.round] ??= {})[r.module] ??= {})[r.case_id] = r.value;
+  for (const r of q.allRemarks.all()) ((rem[r.round] ??= {})[r.module] ??= {})[r.case_id] = r.text;
   for (const r of q.allMeta.all()) meta[r.key] = r.value;
   return { revision, res, rem, meta };
 }
@@ -83,20 +130,37 @@ const server = createServer(async (req, res) => {
 
     if (path === '/api/revision' && req.method === 'GET') return json(res, 200, { revision });
 
-    // { module, cases: {id: "P"/"F"/"N"}, remarks: {caseId: text} } - full module replace
+    // { round, module, cases: {id: "P"/"F"/"N"}, remarks: {caseId: text} }
+    // - replaces that module within that round only
     if (path === '/api/module' && req.method === 'PUT') {
       const b = await body(req);
       if (!b.module) return json(res, 400, { error: 'module required' });
+      if (!b.round)  return json(res, 400, { error: 'round required' });
       db.exec('BEGIN');
       try {
-        q.clrModule.run(b.module);
-        q.clrRemarks.run(b.module);   // remarks are per case now: replace, don't accumulate
+        q.clrModule.run(b.round, b.module);
+        q.clrRemarks.run(b.round, b.module);
         for (const [id, v] of Object.entries(b.cases || {})) {
-          if (v === 'P' || v === 'F' || v === 'N') q.setResult.run(b.module, id, v);
+          if (v === 'P' || v === 'F' || v === 'N') q.setResult.run(b.round, b.module, id, v);
         }
         for (const [caseId, text] of Object.entries(b.remarks || {})) {
-          if (String(text ?? '').trim()) q.setRemark.run(b.module, String(caseId), String(text));
+          if (String(text ?? '').trim()) q.setRemark.run(b.round, b.module, String(caseId), String(text));
         }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      revision++;
+      return json(res, 200, { ok: true, revision });
+    }
+
+    // { round } - discards a round and everything recorded under it
+    if (path === '/api/round' && req.method === 'DELETE') {
+      const b = await body(req);
+      if (!b.round) return json(res, 400, { error: 'round required' });
+      db.exec('BEGIN');
+      try {
+        q.dropRound.run(b.round);
+        q.dropRoundR.run(b.round);
+        q.dropRoundM.run(b.round);   // R2.date, R2.sig_client, ...
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       revision++;

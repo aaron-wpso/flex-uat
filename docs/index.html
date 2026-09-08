@@ -62,6 +62,11 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .legend{display:flex;gap:10px;flex-wrap:wrap}
 .legend span{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)}
 .dot{width:8px;height:8px;border-radius:2px;flex:none}
+.roundbar{padding:11px 18px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+.roundrow{display:flex;gap:6px;align-items:center}
+.roundrow select{flex:1;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:500 13px "IBM Plex Sans",sans-serif;color:var(--ink)}
+.roundrow select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.roundrow .btn{padding:6px 9px;font-size:13px;line-height:1}
 .navwrap{overflow-y:auto;flex:1;padding:8px 10px 20px}
 .navgrp{margin-top:12px;padding:0 8px 6px}
 .navitem{width:100%;display:grid;grid-template-columns:34px 1fr auto;gap:8px;align-items:center;padding:7px 8px;border-radius:6px;text-align:left;line-height:1.25}
@@ -266,6 +271,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
         <span><i class="dot" style="background:var(--nd)"></i>N/D <b class="mono" id="oN">0</b></span>
       </div>
     </div>
+    <div class="roundbar" id="roundbar"></div>
     <nav class="navwrap" id="nav"></nav>
     <div class="railfoot">
       <span class="sync" id="sync"><i class="dot"></i><span id="syncTxt">Connecting...</span></span>
@@ -311,10 +317,34 @@ const META_FIELDS = [
 ];
 
 /* ---------- state ---------- */
+/* res and rem are keyed round -> module -> case id. The test cases never change
+   between rounds; only what was observed against them does. */
 const state = { res:{}, rem:{}, meta:{} };
-DATA.forEach(m=>{ state.res[m.key]={}; state.rem[m.key]={}; });
-let curKey = DATA[0].key, filter="all", db=null;
-const pending = new Set();
+let curKey = DATA[0].key, filter="all";
+
+/* ---------- rounds ---------- */
+/* The round list and the active round live in meta so they persist and sync
+   with everything else. Per-round session details (builds, date, signatures)
+   are meta keys prefixed with the round id - "R2.backend" - because a second
+   round is a second session against a different build. */
+const FIRST_ROUND = [{id:"R1",name:"Round 1"}];
+function rounds(){
+  try{ const r=JSON.parse(state.meta.__rounds||"null"); if(Array.isArray(r)&&r.length) return r; }catch(e){}
+  return FIRST_ROUND;
+}
+function round(){
+  const rs=rounds();
+  return rs.some(r=>r.id===state.meta.__active) ? state.meta.__active : rs[0].id;
+}
+const roundName = id => (rounds().find(r=>r.id===id)||{}).name || id;
+// results / remarks for a module in the active round, read-only
+const resOf = mk => (state.res[round()]||{})[mk] || {};
+const remOf = mk => (state.rem[round()]||{})[mk] || {};
+// the same, created on demand for writing
+const bucket = (o,mk) => (((o[round()] ??= {})[mk] ??= {}));
+// per-round session field
+const mget = k => state.meta[round()+"."+k] || "";
+const mset = (k,v) => { state.meta[round()+"."+k]=v; };
 
 /* ---------- persistence: local server + SQLite ---------- */
 function setSync(cls,txt){ const el=$("#sync"); el.className="sync "+cls; $("#syncTxt").textContent=txt; }
@@ -351,15 +381,14 @@ async function api(path,opts){
   return r.json();
 }
 function applyState(v){
-  DATA.forEach(m=>{ state.res[m.key]=(v.res&&v.res[m.key])||{}; state.rem[m.key]=(v.rem&&v.rem[m.key])||{}; });
-  state.meta=v.meta||{}; revision=v.revision||0;
+  state.res=v.res||{}; state.rem=v.rem||{}; state.meta=v.meta||{}; revision=v.revision||0;
 }
 async function loadState(){
   try{
     applyState(await api("/api/state"));
     online=true; setSync("ok","Saved to this machine");
   }catch(e){ online=false; loadLocal(); }
-  renderNav(); renderOverall(); renderModule();
+  redraw();
 }
 function save(key){
   if(local) return saveLocal();
@@ -367,7 +396,7 @@ function save(key){
   timers[key]=setTimeout(async ()=>{
     try{
       const r=await api("/api/module",{method:"PUT",body:JSON.stringify(
-        {module:key, cases:state.res[key], remarks:state.rem[key]})});
+        {round:round(), module:key, cases:resOf(key), remarks:remOf(key)})});
       revision=r.revision; online=true; setSync("ok","Saved");
     }catch(e){ online=false; setSync("err","Not saved - server unreachable"); }
   },400);
@@ -395,7 +424,7 @@ function startPolling(){
       if(j.revision===revision) return;
       if(document.activeElement && document.activeElement.tagName==="TEXTAREA") return;
       applyState(await api("/api/state"));
-      renderNav(); renderOverall(); renderModule();
+      redraw();
     }catch(e){ if(online){ online=false; setSync("err","Server unreachable"); } }
   },3000);
 }
@@ -410,7 +439,7 @@ function md(s){                       // inline markdown from the source doc
 }
 const allCases = m => m.secs.flatMap(s=>s.cases);
 function tally(m){
-  const r=state.res[m.key]||{}; const t={P:0,F:0,N:0,total:0};
+  const r=resOf(m.key); const t={P:0,F:0,N:0,total:0};
   allCases(m).forEach(c=>{ t.total++; const v=r[c.id]; if(v) t[v]++; });
   t.done=t.P+t.F+t.N; return t;
 }
@@ -436,6 +465,20 @@ function navBtn(m){
     <span class="nvk">${esc(m.key)}</span><span class="nvt">${esc(m.short)}</span>
     <span class="nvc">${t.done}/${t.total}</span>${seg}</button>`;
 }
+function renderRounds(){
+  const rs=rounds(), cur=round();
+  $("#roundbar").innerHTML=`
+    <span class="lbl">Test round</span>
+    <div class="roundrow">
+      <select id="roundSel" aria-label="Test round">${rs.map(r=>
+        `<option value="${esc(r.id)}"${r.id===cur?" selected":""}>${esc(r.name)}</option>`).join("")}</select>
+      <button class="btn" id="newRound" title="Start a new round">+</button>
+      ${rs.length>1?`<button class="btn" id="delRound" title="Delete this round">&times;</button>`:""}
+    </div>`;
+}
+// every round switch redraws the whole board - counts, stats and rows all read the active round
+function redraw(){ renderRounds(); renderNav(); renderOverall(); renderModule(); }
+
 function renderNav(){
   const app = DATA.filter(m=>m.key[0]!=="A");
   const adm = DATA.filter(m=>m.key[0]==="A");
@@ -451,10 +494,10 @@ function renderNav(){
 
 /* ---------- render: a module ---------- */
 function caseRow(c,mk,forPrint){
-  const v=(state.res[mk]||{})[c.id]||"";
+  const v=resOf(mk)[c.id]||"";
   const cls = v==="P"?"done":v==="F"?"failed":v==="N"?"nd":"";
   const steps = c.steps && c.steps!=="-" ? `<div class="csteps">${md(c.steps)}</div>` : "";
-  const rem=(state.rem[mk]||{})[c.id]||"";
+  const rem=remOf(mk)[c.id]||"";
   // print keeps the paper clean: a remark only appears when one was written
   const remBlock = forPrint
     ? (rem ? `<div class="crem"><span class="exlbl">Remark</span><div class="cremp">${esc(rem)}</div></div>` : "")
@@ -494,7 +537,7 @@ function moduleHtml(m,forPrint){
   const t=tally(m);
   const notes=(m.notes||[]).map(n=>`<div class="note">${md(n.replace(/^>\s*/,""))}</div>`).join("");
   const secs=m.secs.map(s=>{
-    const rows=s.cases.filter(c=>forPrint||passes(c,(state.res[m.key]||{})[c.id])).map(c=>caseRow(c,m.key,forPrint)).join("");
+    const rows=s.cases.filter(c=>forPrint||passes(c,resOf(m.key)[c.id])).map(c=>caseRow(c,m.key,forPrint)).join("");
     if(!rows) return "";
     return `<section class="sec">
       <div class="sechead"><h3>${esc(s.name)}</h3><span class="secount mono">${s.cases.length}</span><span class="rule"></span></div>
@@ -531,7 +574,10 @@ function shrink(file){
         const cv=document.createElement("canvas");
         cv.width=Math.round(img.width*scale); cv.height=Math.round(img.height*scale);
         cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);
-        resolve(cv.toDataURL("image/png"));   // PNG keeps ink on transparent/white crisp
+        // PNG keeps pen strokes crisp, but a noisy phone photo can PNG badly;
+        // every round holds its own signatures, so one fat image is a run-wide risk.
+        const png=cv.toDataURL("image/png");
+        resolve(png.length>200e3 ? cv.toDataURL("image/jpeg",0.85) : png);
       };
       img.src=fr.result;
     };
@@ -540,7 +586,7 @@ function shrink(file){
 }
 function sigHtml(forPrint){
   return `<div class="sigs">${SIGNERS.map(([k,label,nameKey])=>{
-    const src=state.meta[k]||"", who=state.meta[nameKey]||"";
+    const src=mget(k), who=mget(nameKey);
     return `<div class="sigbox">
       <span class="lbl">${esc(label)}</span>
       <div class="sigpad">${src?`<img src="${esc(src)}" alt="${esc(label)} signature">`
@@ -559,7 +605,7 @@ function sessionHtml(){
     <div class="modmeta"><span class="lbl">Record on the day</span></div></div>
     <div class="panel"><div class="grid2">${META_FIELDS.map(([k,l,ph,mono])=>
       `<label class="fld"><span class="lbl">${esc(l)}</span>
-       <input data-meta="${k}" class="${mono?"mono":""}" value="${esc(state.meta[k]||ph)}" placeholder="${esc(ph||"-")}"></label>`).join("")}
+       <input data-meta="${k}" class="${mono?"mono":""}" value="${esc(mget(k)||ph)}" placeholder="${esc(ph||"-")}"></label>`).join("")}
     </div></div>
     <section class="sec"><div class="sechead"><h3>Sign-off signatures</h3><span class="rule"></span></div>
       <div class="panel">${sigHtml()}</div>
@@ -614,10 +660,11 @@ $("#nav").addEventListener("click",e=>{
 $("#content").addEventListener("click",e=>{
   const btn=e.target.closest(".seg button"); if(!btn) return;
   const row=btn.closest(".row"), id=row.dataset.id, mk=curKey;
-  const cur=(state.res[mk]||{})[id];
+  const cells=bucket(state.res,mk);
+  const cur=cells[id];
   const val=btn.dataset.v;
-  if(cur===val) delete state.res[mk][id]; else state.res[mk][id]=val;
-  const now=state.res[mk][id];
+  if(cur===val) delete cells[id]; else cells[id]=val;
+  const now=cells[id];
   row.querySelectorAll(".seg button").forEach(b=>b.setAttribute("aria-pressed", String(b.dataset.v===now)));
   row.className="row "+(now==="P"?"done":now==="F"?"failed":now==="N"?"nd":"");
   save(mk); renderNav(); renderOverall(); refreshStats();
@@ -625,25 +672,61 @@ $("#content").addEventListener("click",e=>{
 $("#content").addEventListener("input",e=>{
   const ta=e.target.closest("textarea[data-rem]");
   if(ta){
-    state.rem[curKey][ta.dataset.rem]=ta.value;
+    bucket(state.rem,curKey)[ta.dataset.rem]=ta.value;
     ta.style.height="auto"; ta.style.height=ta.scrollHeight+"px";   // grow to fit
     save(curKey); return;
   }
   const inp=e.target.closest("input[data-meta]");
-  if(inp){ state.meta[inp.dataset.meta]=inp.value; saveMeta(); }
+  if(inp){ mset(inp.dataset.meta,inp.value); saveMeta(); }
 });
 $("#content").addEventListener("change",async e=>{
   const f=e.target.closest("input[data-sig]"); if(!f||!f.files[0]) return;
   try{
-    state.meta[f.dataset.sig]=await shrink(f.files[0]);
+    mset(f.dataset.sig, await shrink(f.files[0]));
     saveMeta(); renderModule();
   }catch(err){ alert(err.message); }
 });
 $("#content").addEventListener("click",e=>{
   const b=e.target.closest("button[data-sigclear]"); if(!b) return;
-  state.meta[b.dataset.sigclear]="";   // blank, not delete - a PUT of meta only upserts keys
+  mset(b.dataset.sigclear,"");   // blank, not delete - a PUT of meta only upserts keys
   saveMeta(); renderModule();
 });
+
+/* ---------- round switching ---------- */
+$("#roundbar").addEventListener("change",e=>{
+  if(e.target.id!=="roundSel") return;
+  state.meta.__active=e.target.value; saveMeta(); redraw();
+});
+$("#roundbar").addEventListener("click",async e=>{
+  if(e.target.closest("#newRound")){
+    const rs=rounds().slice();
+    // number from the highest existing id, so deleting R2 then adding gives R3, not a collision
+    const n=Math.max(...rs.map(r=>parseInt(String(r.id).replace(/\D/g,""),10)||0))+1;
+    rs.push({id:"R"+n,name:"Round "+n});
+    state.meta.__rounds=JSON.stringify(rs); state.meta.__active="R"+n;
+    saveMeta(); redraw(); return;
+  }
+  if(e.target.closest("#delRound")){
+    const rs=rounds(), id=round();
+    if(rs.length<2) return;
+    const t=tally0(id);
+    const warn = t ? `${t} recorded result${t===1?"":"s"} in this round will be lost.`
+                   : "Nothing has been recorded in it yet.";
+    if(!confirm(`Delete ${roundName(id)}?\n\n${warn}\nThe test cases themselves are not affected.`)) return;
+    const left=rs.filter(r=>r.id!==id);
+    delete state.res[id]; delete state.rem[id];
+    Object.keys(state.meta).forEach(k=>{ if(k.startsWith(id+".")) delete state.meta[k]; });
+    state.meta.__rounds=JSON.stringify(left); state.meta.__active=left[0].id;
+    if(!local){ try{ await api("/api/round",{method:"DELETE",body:JSON.stringify({round:id})}); }catch(err){} }
+    saveMeta(); redraw();
+  }
+});
+// how much is recorded in a given round - used only to warn before deleting one
+function tally0(id){
+  const r=state.res[id]||{};
+  return Object.values(r).reduce((n,mod)=>n+Object.keys(mod).length,0);
+}
+
 $("#filters").addEventListener("click",e=>{
   const b=e.target.closest("button[data-f]"); if(!b) return;
   filter=b.dataset.f;
@@ -660,17 +743,19 @@ $("#nextBtn").onclick=()=>step(1);
 
 /* ---------- print snapshot ---------- */
 function buildPrint(){
-  const m=state.meta, line=(l,v)=>v?`<tr><td><b>${esc(l)}</b></td><td class="num">${esc(v)}</td></tr>`:"";
+  // the document is one round: whichever is active when Export is pressed
+  const m=k=>mget(k), line=(l,v)=>v?`<tr><td><b>${esc(l)}</b></td><td class="num">${esc(v)}</td></tr>`:"";
   let P=0,F=0,N=0,T=0; DATA.forEach(x=>{const t=tally(x);P+=t.P;F+=t.F;N+=t.N;T+=t.total;});
   const head=`<div class="printonly">
-    <h1 style="font-size:19pt;margin-bottom:2mm">FLEX Phase 1 - UAT Results</h1>
+    <h1 style="font-size:19pt;margin-bottom:2mm">FLEX Phase 1 - UAT Results <span style="font-weight:500;color:#555">- ${esc(roundName(round()))}</span></h1>
     <p style="font-size:9pt;color:#444;margin:0 0 4mm">Plus One Software Solution - Thrive AI &amp; Tech Sdn. Bhd. -
       Snapshot ${esc(new Date().toLocaleString("en-GB",{dateStyle:"medium",timeStyle:"short"}))}</p>
     <table class="dtable" style="margin-bottom:5mm"><tbody>
-      ${line("Session date",m.date)}${line("Location / mode",m.location)}
-      ${line("Vendor demonstrator",m.vendor)}${line("Client reviewer",m.client)}
-      ${line("iOS build",m.ios)}${line("Android build",m.android)}
-      ${line("Backend commit",m.backend)}${line("Mobile commit",m.mobile)}${line("Admin commit",m.admin)}${line("API endpoint",m.api)}
+      <tr><td><b>Test round</b></td><td class="num">${esc(roundName(round()))}</td></tr>
+      ${line("Session date",m("date"))}${line("Location / mode",m("location"))}
+      ${line("Vendor demonstrator",m("vendor"))}${line("Client reviewer",m("client"))}
+      ${line("iOS build",m("ios"))}${line("Android build",m("android"))}
+      ${line("Backend commit",m("backend"))}${line("Mobile commit",m("mobile"))}${line("Admin commit",m("admin"))}${line("API endpoint",m("api"))}
       <tr><td><b>Result</b></td><td class="num">${P+F+N} of ${T} recorded - ${P} pass, ${F} fail, ${N} not demonstrated</td></tr>
     </tbody></table>
     <table class="dtable" style="margin-bottom:6mm"><thead><tr><th>Module</th><th>Cases</th><th>Pass</th><th>Fail</th><th>N/D</th><th>Outstanding</th></tr></thead><tbody>
@@ -686,7 +771,7 @@ function buildPrint(){
   $("#content").innerHTML=head+body+tail;
   // stamp results as glyphs for print
   DATA.forEach(x=>{
-    const r=state.res[x.key]||{};
+    const r=resOf(x.key);
     $("#content").querySelectorAll(`[data-mod="${x.key}"] .row[data-id]`).forEach(row=>{
       const v=r[row.dataset.id];
       row.querySelector(".segwrap").innerHTML =
@@ -718,7 +803,7 @@ DATA.forEach(m=>{
   m.short = /^S99/.test(m.title) ? "Cross-module & non-functional"
           : m.title.replace(/^Module\s+[A-Z]?\d+\s*[^A-Za-z0-9(]*/,"");
 });
-renderNav(); renderOverall(); renderModule();
+redraw();
 loadState().then(startPolling);
 })();
 </script>
