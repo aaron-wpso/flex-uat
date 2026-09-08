@@ -1,0 +1,7 @@
+# Session results - a live UAT record, never a repo artifact
+uat.db
+uat.db-shm
+uat.db-wal
+
+.playwright-mcp/
+node_modules/
