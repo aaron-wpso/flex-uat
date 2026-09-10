@@ -1,6 +1,6 @@
 # FLEX Phase 1 UAT - local check-off app
 
-Tool for running the Phase 1 UAT session. 574 test cases across 20 modules,
+Tool for running the Phase 1 UAT session. 538 test cases across 20 modules,
 ticked live with a remark against each individual case, a signature block for
 sign-off, and as many test rounds as the project needs.
 
@@ -33,7 +33,7 @@ and both boards stay in step (polled every 3 seconds).
 
 ## Test rounds
 
-The 574 test cases are fixed. What changes between a first pass and a retest
+The 538 test cases are fixed. What changes between a first pass and a retest
 after bugfixes is what was *observed*, so results are recorded per round.
 
 Pick the round in the left rail. **+** starts the next one, **x** discards the
@@ -68,7 +68,7 @@ Inspect it with any SQLite browser, or:
 
 ## Export the PDF for the client
 
-Click **Export PDF**. It lays out all 574 cases from M1 through A12 as one
+Click **Export PDF**. It lays out all 538 cases from M1 through A12 as one
 document - cover sheet with the session details and per-module totals, then
 every module with its ticks stamped and remarks included - and opens the browser
 print dialog. Choose **Save as PDF**.
@@ -95,7 +95,7 @@ or just delete `uat.db` and restart.
 
 ## No app? Use the paper version
 
-`../files/FLEX_Phase1_UAT_TestCases.pdf` is the same 574 cases as a printable
+`../files/FLEX_Phase1_UAT_TestCases.pdf` is the same 538 cases as a printable
 checklist with `[ ] P  [ ] F  [ ] N/D` boxes and remarks space. Rebuild it with:
 
     cd ../files
