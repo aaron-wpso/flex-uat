@@ -310,10 +310,7 @@ const $ = (s,r)=> (r||document).querySelector(s);
 const META_FIELDS = [
   ["date","Session date","",false],["location","Location / mode","",false],
   ["vendor","Vendor demonstrator","So Wei Ping (Plus One)",false],
-  ["client","Client reviewer (signs)","",false],
-  ["ios","iOS version / build","",true],["android","Android version / build","",true],
-  ["backend","Backend commit","",true],["mobile","Mobile commit","",true],
-  ["admin","Admin portal commit","",true],["api","API endpoint","",true]
+  ["client","Client reviewer (signs)","",false]
 ];
 
 /* ---------- state ---------- */
@@ -754,8 +751,6 @@ function buildPrint(){
       <tr><td><b>Test round</b></td><td class="num">${esc(roundName(round()))}</td></tr>
       ${line("Session date",m("date"))}${line("Location / mode",m("location"))}
       ${line("Vendor demonstrator",m("vendor"))}${line("Client reviewer",m("client"))}
-      ${line("iOS build",m("ios"))}${line("Android build",m("android"))}
-      ${line("Backend commit",m("backend"))}${line("Mobile commit",m("mobile"))}${line("Admin commit",m("admin"))}${line("API endpoint",m("api"))}
       <tr><td><b>Result</b></td><td class="num">${P+F+N} of ${T} recorded - ${P} pass, ${F} fail, ${N} not demonstrated</td></tr>
     </tbody></table>
     <table class="dtable" style="margin-bottom:6mm"><thead><tr><th>Module</th><th>Cases</th><th>Pass</th><th>Fail</th><th>N/D</th><th>Outstanding</th></tr></thead><tbody>
